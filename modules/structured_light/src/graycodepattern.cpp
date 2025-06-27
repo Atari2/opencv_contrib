@@ -40,6 +40,7 @@
  //M*/
 
 #include "precomp.hpp"
+#include <numeric>
 
 namespace cv {
 namespace structured_light {
@@ -56,7 +57,8 @@ class CV_EXPORTS_W GrayCodePattern_Impl CV_FINAL : public GrayCodePattern
   bool generate( OutputArrayOfArrays patternImages ) CV_OVERRIDE;
 
   // Decodes the gray code pattern, computing the disparity map
-  bool decode( const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap, InputArrayOfArrays blackImages = noArray(),
+  bool decode( const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap, 
+                       OutputArrayOfArrays shadowMasks = noArray(), InputArrayOfArrays blackImages = noArray(),
                InputArrayOfArrays whiteImages = noArray(), int flags = DECODE_3D_UNDERWORLD ) const CV_OVERRIDE;
 
   // Returns the number of pattern images for the graycode pattern
@@ -209,6 +211,7 @@ bool GrayCodePattern_Impl::generate( OutputArrayOfArrays pattern )
 }
 
 bool GrayCodePattern_Impl::decode( const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap,
+                                    OutputArrayOfArrays outShadowMasks,
                                    InputArrayOfArrays blackImages, InputArrayOfArrays whitheImages, int flags ) const
 {
   const std::vector<std::vector<Mat> >& acquired_pattern = patternImages;
@@ -218,6 +221,13 @@ bool GrayCodePattern_Impl::decode( const std::vector< std::vector<Mat> >& patter
     // Computing shadows mask, shadowMasks are always 8-bit images.
     std::vector<Mat> shadowMasks;
     computeShadowMasks(blackImages, whitheImages, shadowMasks);
+
+    std::vector<Mat>& shadowMasks_ = *( std::vector<Mat>* ) outShadowMasks.getObj();
+    shadowMasks_.resize( shadowMasks.size() + 1);
+    for( size_t i = 0; i < shadowMasks.size(); i++ )
+    {
+        shadowMasks_[i] = shadowMasks[i].clone();
+    }
 
     int cam_width = acquired_pattern[0][0].cols;
     int cam_height = acquired_pattern[0][0].rows;
@@ -243,62 +253,42 @@ bool GrayCodePattern_Impl::decode( const std::vector< std::vector<Mat> >& patter
                             bool error =
                                 getProjPixelFast(fastPatternColImages[k], fastPatternRowImages[k], i, j, projPixel);
 
-                            if (error) {
-                                continue;
+                            if (!error) {
+                                camsPixels[k][projPixel.x * params.height + projPixel.y]
+                                    .push_back(Point(i, j));
                             }
-
-                            camsPixels[k][projPixel.x * params.height + projPixel.y]
-                                .push_back(Point(i, j));
                         }
                     }
                 }
             }
         });
 
-    std::vector<Point> cam1Pixs, cam2Pixs;
-
     Mat& disparityMap_ = *( Mat* ) disparityMap.getObj();
     disparityMap_ = Mat( cam_height, cam_width, CV_64F, double( 0 ) );
+    Mat invalidMask = Mat( cam_height, cam_width, CV_8U, Scalar( 0 ) );
 
     for( int i = 0; i < params.width; i++ )
     {
-      for( int j = 0; j < params.height; j++ )
-      {
-        cam1Pixs = camsPixels[0][i * params.height + j];
-        cam2Pixs = camsPixels[1][i * params.height + j];
-
-        if( cam1Pixs.size() == 0 || cam2Pixs.size() == 0 )
-          continue;
-
-        Point p1;
-        Point p2;
-
-        double sump1x = 0;
-        double sump2x = 0;
-
-        for( int c1 = 0; c1 < (int) cam1Pixs.size(); c1++ )
+        for( int j = 0; j < params.height; j++ )
         {
-          p1 = cam1Pixs[c1];
-          sump1x += p1.x;
-        }
-        for( int c2 = 0; c2 < (int) cam2Pixs.size(); c2++ )
-        {
-          p2 = cam2Pixs[c2];
-          sump2x += p2.x;
-        }
+            const auto& cam1Pixs = camsPixels[0][i * params.height + j];
+            const auto& cam2Pixs = camsPixels[1][i * params.height + j];
 
-        sump2x /= cam2Pixs.size();
-        sump1x /= cam1Pixs.size();
-        for( int c1 = 0; c1 < (int) cam1Pixs.size(); c1++ )
-        {
-          p1 = cam1Pixs[c1];
-          disparityMap_.at<double>( p1.y, p1.x ) = ( double ) (sump2x - sump1x);
-        }
+            if(cam1Pixs.empty() || cam2Pixs.empty()) {
+                invalidMask.at<uchar>(j, i) = 255;
+                continue;
+            }
 
-        sump2x = 0;
-        sump1x = 0;
-      }
+            double avgp1x = std::accumulate(cam1Pixs.begin(), cam1Pixs.end(), double{ 0 }, [](double val, const auto& p1) { return val + p1.x;  }) / static_cast<double>(cam1Pixs.size());
+            double avgp2x = std::accumulate(cam2Pixs.begin(), cam2Pixs.end(), double{ 0 }, [](double val, const auto& p2) { return val + p2.x;  }) / static_cast<double>(cam2Pixs.size());
+
+            for( const auto& p1 : cam1Pixs)
+            {
+                disparityMap_.at<double>( p1.y, p1.x ) = (avgp2x - avgp1x);
+            }
+        }
     }
+    shadowMasks_[shadowMasks.size()] = std::move(invalidMask);
 
     return true;
   }  // end if flags

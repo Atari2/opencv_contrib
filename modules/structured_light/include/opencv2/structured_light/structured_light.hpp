@@ -79,6 +79,7 @@ class CV_EXPORTS_W StructuredLightPattern : public virtual Algorithm
    */
   CV_WRAP
   virtual bool decode( const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap,
+                       OutputArrayOfArrays shadowMasks = noArray(),
                        InputArrayOfArrays blackImages = noArray(),
                        InputArrayOfArrays whiteImages = noArray(),
                        int flags = DECODE_3D_UNDERWORLD ) const = 0;

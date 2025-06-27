@@ -57,6 +57,7 @@ public:
     bool generate( OutputArrayOfArrays patternImages ) CV_OVERRIDE;
 
     bool decode( const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap,
+                       OutputArrayOfArrays shadowMasks = noArray(),
                 InputArrayOfArrays blackImages = noArray(), InputArrayOfArrays whiteImages =
                 noArray(), int flags = 0 ) const CV_OVERRIDE;
 
@@ -260,11 +261,13 @@ bool SinusoidalPatternProfilometry_Impl::generate( OutputArrayOfArrays pattern )
 
 bool SinusoidalPatternProfilometry_Impl::decode(const std::vector< std::vector<Mat> >& patternImages,
                                                 OutputArray disparityMap,
+                       OutputArrayOfArrays shadowMasks,
                                                 InputArrayOfArrays blackImages,
                                                 InputArrayOfArrays whiteImages, int flags ) const
 {
     CV_UNUSED(patternImages);
     CV_UNUSED(disparityMap);
+    CV_UNUSED(shadowMasks);
     CV_UNUSED(blackImages);
     CV_UNUSED(whiteImages);
     CV_UNUSED(flags);
