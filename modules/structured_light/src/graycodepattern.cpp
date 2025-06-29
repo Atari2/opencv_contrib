@@ -210,52 +210,50 @@ bool GrayCodePattern_Impl::generate( OutputArrayOfArrays pattern )
   return true;
 }
 
-bool GrayCodePattern_Impl::decode( const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap,
-                                    OutputArrayOfArrays outShadowMasks,
-                                   InputArrayOfArrays blackImages, InputArrayOfArrays whitheImages, int flags ) const
+
+bool GrayCodePattern_Impl::decode(const std::vector< std::vector<Mat> >& patternImages, OutputArray disparityMap,
+    OutputArrayOfArrays outShadowMasks,
+    InputArrayOfArrays blackImages, InputArrayOfArrays whiteImages, int flags) const
 {
-  const std::vector<std::vector<Mat> >& acquired_pattern = patternImages;
+    const std::vector<std::vector<Mat>>& acquired_pattern = patternImages;
 
-  if( flags == DECODE_3D_UNDERWORLD )
-  {
-    // Computing shadows mask, shadowMasks are always 8-bit images.
-    std::vector<Mat> shadowMasks;
-    computeShadowMasks(blackImages, whitheImages, shadowMasks);
-
-    std::vector<Mat>& shadowMasks_ = *( std::vector<Mat>* ) outShadowMasks.getObj();
-    shadowMasks_.resize( shadowMasks.size() + 1);
-    for( size_t i = 0; i < shadowMasks.size(); i++ )
+    if (flags == DECODE_3D_UNDERWORLD)
     {
-        shadowMasks_[i] = shadowMasks[i].clone();
-    }
+        // Shadow mask computation remains the same
+        std::vector<Mat> shadowMasks;
+        computeShadowMasks(blackImages, whiteImages, shadowMasks);
 
-    int cam_width = acquired_pattern[0][0].cols;
-    int cam_height = acquired_pattern[0][0].rows;
+        std::vector<Mat>& shadowMasks_ = *(std::vector<Mat>*) outShadowMasks.getObj();
+        shadowMasks_.resize(shadowMasks.size() + 1);
+        for (size_t i = 0; i < shadowMasks.size(); i++)
+        {
+            shadowMasks_[i] = shadowMasks[i].clone();
+        }
 
-    // Storage for the pixels of the two cams that correspond to the same pixel of the projector
-    std::vector<std::vector<std::vector<Point> > > camsPixels;
-    camsPixels.resize( acquired_pattern.size() );
-    std::vector<std::vector<Mat>> fastPatternColImages;
-    std::vector<std::vector<Mat>> fastPatternRowImages;
-    populateFastPatternImages(acquired_pattern, fastPatternColImages, fastPatternRowImages);
-    
-    parallel_for_(
-        Range(0, (int)acquired_pattern.size()), [&](const Range& range) {
-            Point projPixel;
+        int num_cameras = static_cast<int>(acquired_pattern.size());
+        CV_Assert(num_cameras == 2 && "This implementation expects a stereo camera setup (2 cameras).");
+
+        int cam_width = acquired_pattern[0][0].cols;
+        int cam_height = acquired_pattern[0][0].rows;
+        int proj_width = params.width;
+        int proj_height = params.height;
+
+        std::vector<std::vector<Mat>> fastPatternColImages;
+        std::vector<std::vector<Mat>> fastPatternRowImages;
+        populateFastPatternImages(acquired_pattern, fastPatternColImages, fastPatternRowImages);
+
+        std::vector<Mat> projectorCoordinateMap(num_cameras);
+        parallel_for_(Range(0, num_cameras), [&](const Range& range) {
             for (int k = range.start; k < range.end; k++) {
-                camsPixels[k].resize(params.height * params.width);
-                for (int i = 0; i < cam_width; i++) {
-                    for (int j = 0; j < cam_height; j++) {
-                        // if the pixel is not shadowed, reconstruct
+                projectorCoordinateMap[k] = Mat(cam_height, cam_width, CV_32SC2, Vec2i(-1, -1));
+                Point projPixel;
+                const auto& fastCol = fastPatternColImages[k];
+                const auto& fastRow = fastPatternRowImages[k];
+                for (int j = 0; j < cam_height; j++) {
+                    for (int i = 0; i < cam_width; i++) {
                         if (shadowMasks[k].at<uchar>(j, i)) {
-                            // for a (x,y) pixel of the camera returns the corresponding
-                            // projector pixel by calculating the decimal number
-                            bool error =
-                                getProjPixelFast(fastPatternColImages[k], fastPatternRowImages[k], i, j, projPixel);
-
-                            if (!error) {
-                                camsPixels[k][projPixel.x * params.height + projPixel.y]
-                                    .push_back(Point(i, j));
+                            if (!getProjPixelFast(fastCol, fastRow, i, j, projPixel)) {
+                                projectorCoordinateMap[k].at<Vec2i>(j, i) = Vec2i(projPixel.x, projPixel.y);
                             }
                         }
                     }
@@ -263,37 +261,60 @@ bool GrayCodePattern_Impl::decode( const std::vector< std::vector<Mat> >& patter
             }
         });
 
-    Mat& disparityMap_ = *( Mat* ) disparityMap.getObj();
-    disparityMap_ = Mat( cam_height, cam_width, CV_64F, double( 0 ) );
-    Mat invalidMask = Mat( cam_height, cam_width, CV_8U, Scalar( 0 ) );
-
-    for( int i = 0; i < params.width; i++ )
-    {
-        for( int j = 0; j < params.height; j++ )
-        {
-            const auto& cam1Pixs = camsPixels[0][i * params.height + j];
-            const auto& cam2Pixs = camsPixels[1][i * params.height + j];
-
-            if(cam1Pixs.empty() || cam2Pixs.empty()) {
-                invalidMask.at<uchar>(j, i) = 255;
-                continue;
-            }
-
-            double avgp1x = std::accumulate(cam1Pixs.begin(), cam1Pixs.end(), double{ 0 }, [](double val, const auto& p1) { return val + p1.x;  }) / static_cast<double>(cam1Pixs.size());
-            double avgp2x = std::accumulate(cam2Pixs.begin(), cam2Pixs.end(), double{ 0 }, [](double val, const auto& p2) { return val + p2.x;  }) / static_cast<double>(cam2Pixs.size());
-
-            for( const auto& p1 : cam1Pixs)
-            {
-                disparityMap_.at<double>( p1.y, p1.x ) = (avgp2x - avgp1x);
+        std::vector<Mat> sumX(num_cameras);
+        std::vector<Mat> counts(num_cameras);
+        for (int k = 0; k < num_cameras; ++k) {
+            sumX[k] = Mat::zeros(proj_height, proj_width, CV_64F);
+            counts[k] = Mat::zeros(proj_height, proj_width, CV_32S);
+        }
+        for (int k = 0; k < num_cameras; ++k) {
+            for (int j = 0; j < cam_height; ++j) {
+                for (int i = 0; i < cam_width; ++i) {
+                    const Vec2i& projPt = projectorCoordinateMap[k].at<Vec2i>(j, i);
+                    if (projPt[0] != -1) {
+                        sumX[k].at<double>(projPt[1], projPt[0]) += i;
+                        counts[k].at<int>(projPt[1], projPt[0]) += 1;
+                    }
+                }
             }
         }
+
+        Mat counts_64F[2], avgX[2];
+        counts[0].convertTo(counts_64F[0], CV_64F);
+        counts[1].convertTo(counts_64F[1], CV_64F);
+        cv::divide(sumX[0], counts_64F[0], avgX[0]);
+        cv::divide(sumX[1], counts_64F[1], avgX[1]);
+
+        Mat projectorDisparity = avgX[1] - avgX[0];
+        Mat validProjectorPixels = (counts[0] > 0) & (counts[1] > 0);
+
+        Mat& disparityMap_ = *(Mat*)disparityMap.getObj();
+        Mat map_x(cam_height, cam_width, CV_32F);
+        Mat map_y(cam_height, cam_width, CV_32F);
+
+        std::vector<Mat> projMapChannels;
+        cv::split(projectorCoordinateMap[0], projMapChannels);
+        projMapChannels[0].convertTo(map_x, CV_32F); // Projector x-coordinates
+        projMapChannels[1].convertTo(map_y, CV_32F); // Projector y-coordinates
+
+        // Remap disparity values. INTER_NEAREST ensures identical results to the loop-based lookup.
+        // BORDER_CONSTANT(0) handles pixels with no valid projection, setting their disparity to 0.
+        cv::remap(projectorDisparity, disparityMap_, map_x, map_y,
+            INTER_NEAREST, BORDER_CONSTANT, Scalar(0));
+
+        // Remap the validity mask and invert it to get the final invalid mask.
+        Mat validCameraPixels;
+        cv::remap(validProjectorPixels, validCameraPixels, map_x, map_y,
+            INTER_NEAREST, BORDER_CONSTANT, Scalar(0));
+
+        Mat invalidMask;
+        cv::bitwise_not(validCameraPixels, invalidMask);
+
+        shadowMasks_[shadowMasks.size()] = std::move(invalidMask);
+        return true;
     }
-    shadowMasks_[shadowMasks.size()] = std::move(invalidMask);
 
-    return true;
-  }  // end if flags
-
-  return false;
+    return false;
 }
 
 // Computes the required number of pattern images
